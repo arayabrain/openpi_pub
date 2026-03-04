@@ -61,7 +61,8 @@ class Policy(BasePolicy):
             self._sample_actions = model.sample_actions
         else:
             # JAX model setup
-            self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            # Set static args so regardless of num_steps in sample_kwargs, speed is consistent.
+            self._sample_actions = nnx_utils.module_jit(model.sample_actions, static_argnames=("num_steps",))
             self._rng = rng or jax.random.key(0)
 
     @override

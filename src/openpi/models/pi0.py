@@ -1,5 +1,6 @@
 import logging
 
+import chex
 import einops
 import flax.nnx as nnx
 import flax.nnx.bridge as nnx_bridge
@@ -69,6 +70,7 @@ class Pi0(_model.BaseModel):
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
+        self.configs = [paligemma_config, action_expert_config]
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
@@ -221,6 +223,7 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        kv_cache: at.Float[at.Array, "2 n b s 1 mlpdim"] | None = None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -234,7 +237,15 @@ class Pi0(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        if kv_cache is None:
+            _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        else:
+            # If kv_cache is passed as a stacked array, convert it back to a tuple
+            if not isinstance(kv_cache, tuple):
+                kv_cache = (kv_cache[0].astype(prefix_tokens.dtype), kv_cache[1].astype(prefix_tokens.dtype))
+
+        chex.assert_shape(kv_cache[0], (self.configs[0].depth, batch_size, prefix_mask.shape[1], self.configs[0].num_kv_heads, self.configs[0].head_dim))
+        chex.assert_shape(kv_cache[1], (self.configs[0].depth, batch_size, prefix_mask.shape[1], self.configs[0].num_kv_heads, self.configs[0].head_dim))
 
         def step(carry):
             x_t, time = carry
@@ -277,3 +288,31 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    # get the prefix representation (and optionally the kv cache)
+    def get_prefix_rep(self, observation: _model.Observation, *, return_kv_cache: bool = False):
+        """
+        Returns the Gemma (VLM) hidden-state representations for images + language.
+        hidden_state shape is [B, S_prefix, W], where:
+          B = batch size,
+          S_prefix = total # of image tokens + text tokens,
+          W = Gemma hidden-width.
+        We take the last valid hidden-state as the image+language representation.
+
+        If return_kv_cache is True, also returns the kv cache.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (hidden_state, _), kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        last_true_from_end = jnp.argmax(prefix_mask[:, ::-1], axis=1)  # 0-based from end
+        last_valid_idx = prefix_mask.shape[1] - 1 - last_true_from_end
+        # Handle case where all entries are False
+        last_valid_idx = jnp.where(prefix_mask.any(1), last_valid_idx, -1)  # -1 if no valid tokens
+        img_rep_pi0 = jnp.take_along_axis(hidden_state, last_valid_idx[:, None, None], axis=1)[:, 0, :]
+
+        if return_kv_cache:
+            return img_rep_pi0, kv_cache
+        return img_rep_pi0
