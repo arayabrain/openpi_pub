@@ -1,3 +1,9 @@
+# openpi_pub
+Fork from the original openpi repo with additional functionalities
+- Infer with a precomputed `kv_cache`, and adding method for separately computing `kv_cache`
+- Adding **batched inference** for pi0.5 model
+- Adding **sharding of the inputs** when doing batched inference for faster computation
+
 # openpi
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
