@@ -3,6 +3,7 @@ import os
 import pathlib
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 
 import openpi.models.model as _model
@@ -22,6 +23,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    sharding: jax.sharding.Sharding | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -54,7 +56,7 @@ def create_trained_policy(
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
-        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16, sharding=sharding))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
@@ -87,8 +89,15 @@ def create_trained_policy(
             *data_config.data_transforms.outputs,
             *repack_transforms.outputs,
         ],
+        batch_output_transforms=[
+            *data_config.data_transforms.outputs,
+            *repack_transforms.outputs,
+        ],
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        norm_stats=norm_stats,
+        use_quantile_norm=data_config.use_quantile_norm,
+        sharding=sharding,
     )
